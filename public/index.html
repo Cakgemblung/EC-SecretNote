@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CryptoChat EC-ElGamal</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/elliptic/6.5.4/elliptic.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        body { background: #e9ecef; }
+        .cipher-box { 
+            background: #000; color: #0f0; font-family: 'Courier New', monospace; 
+            padding: 10px; border-radius: 5px; word-break: break-all; font-size: 0.8em;
+        }
+        .hidden-msg { filter: blur(5px); user-select: none; transition: 0.3s; }
+        .revealed-msg { filter: blur(0); background: #d4edda; padding: 5px; border-radius: 3px; font-weight: bold;}
+    </style>
+</head>
+<body>
+
+<div class="container py-4">
+    <h3 class="text-center fw-bold mb-4">🔐 EC-ElGamal Secure Chat</h3>
+
+    <!-- HALAMAN AUTH (LOGIN/REGISTER) -->
+    <div id="authSection" class="row justify-content-center">
+        <div class="col-md-6">
+            <div class="card shadow">
+                <div class="card-header">
+                    <ul class="nav nav-tabs card-header-tabs" id="myTab" role="tablist">
+                        <li class="nav-item"><a class="nav-link active" id="login-tab" data-bs-toggle="tab" href="#loginPanel" role="tab">Login</a></li>
+                        <li class="nav-item"><a class="nav-link" id="reg-tab" data-bs-toggle="tab" href="#regPanel" role="tab">Register Baru</a></li>
+                    </ul>
+                </div>
+                <div class="card-body tab-content">
+                    <!-- LOGIN -->
+                    <div class="tab-pane fade show active" id="loginPanel">
+                        <div class="mb-3">
+                            <label>Username</label>
+                            <input type="text" id="loginUser" class="form-control">
+                        </div>
+                        <div class="mb-3">
+                            <label>Password</label>
+                            <input type="password" id="loginPass" class="form-control">
+                        </div>
+                        <button onclick="doLogin()" class="btn btn-primary w-100">Masuk</button>
+                    </div>
+                    <!-- REGISTER -->
+                    <div class="tab-pane fade" id="regPanel">
+                        <div class="alert alert-info py-1"><small>Keypair akan dibuat otomatis di browser.</small></div>
+                        <div class="mb-3">
+                            <label>Username Baru</label>
+                            <input type="text" id="regUser" class="form-control">
+                        </div>
+                        <div class="mb-3">
+                            <label>Password (Untuk Enkripsi Private Key)</label>
+                            <input type="password" id="regPass" class="form-control">
+                        </div>
+                        <button onclick="doRegister()" class="btn btn-success w-100">Generate Key & Daftar</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- HALAMAN CHAT (Disembunyikan saat belum login) -->
+    <div id="chatSection" style="display:none;">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <div>Login sebagai: <span class="badge bg-primary fs-6" id="myUsernameDisplay">User</span></div>
+            <button onclick="location.reload()" class="btn btn-sm btn-outline-danger">Logout</button>
+        </div>
+
+        <div class="row">
+            <!-- PANEL KIRI: KIRIM PESAN -->
+            <div class="col-md-5 mb-3">
+                <div class="card shadow-sm border-primary">
+                    <div class="card-header bg-primary text-white">Fase 2: Enkripsi (Kirim)</div>
+                    <div class="card-body">
+                        <div class="mb-2">
+                            <label>Kirim Ke:</label>
+                            <select id="recipientSelect" class="form-select"></select>
+                        </div>
+                        <div class="mb-2">
+                            <label>Pesan Rahasia:</label>
+                            <textarea id="msgInput" class="form-control" rows="3" placeholder="Tulis pesan..."></textarea>
+                        </div>
+                        <button onclick="encryptAndSend()" class="btn btn-dark w-100">🔒 Enkripsi & Kirim</button>
+                    </div>
+                </div>
+                
+                <div class="card mt-3">
+                    <div class="card-header">Info Debug</div>
+                    <div class="card-body">
+                        <small class="text-muted">Public Key Anda:</small>
+                        <div id="debugPubKey" class="text-truncate" style="font-size: 0.7em; color:blue;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- PANEL KANAN: INBOX -->
+            <div class="col-md-7">
+                <div class="card shadow-sm border-success">
+                    <div class="card-header bg-success text-white">Fase 3: Inbox (Ciphertext Only)</div>
+                    <div class="card-body" id="inboxArea" style="height: 400px; overflow-y: auto; background: #f8f9fa;">
+                        <p class="text-center text-muted mt-5">Belum ada pesan masuk.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    const socket = io();
+    const EC = elliptic.ec;
+    const ec = new EC('secp256k1');
+
+    let myKeypair = null; // Ini akan diisi setelah Login/Register
+    let myUsername = "";
+
+    // === AUTH SYSTEM ===
+
+    function doRegister() {
+        const u = document.getElementById('regUser').value;
+        const p = document.getElementById('regPass').value;
+        if(!u || !p) return alert("Isi semua data!");
+
+        // 1. Generate Keypair
+        const key = ec.genKeyPair();
+        const pubKey = key.getPublic('hex');
+        const privKey = key.getPrivate('hex');
+
+        // 2. Amankan Private Key sebelum dikirim ke server
+        // Kita enkripsi Private Key pakai password user (AES) agar server tidak tahu Private Key asli
+        const encryptedPrivKey = CryptoJS.AES.encrypt(privKey, p).toString();
+
+        // 3. Kirim ke server
+        socket.emit('register_user', {
+            username: u,
+            password: p, // Di app nyata, password di-hash di client atau server
+            publicKey: pubKey,
+            encryptedPrivateKey: encryptedPrivKey
+        });
+    }
+
+    socket.on('register_response', (res) => {
+        if(res.success) {
+            alert("Registrasi Berhasil! Silakan Login.");
+            document.getElementById('login-tab').click(); // Pindah tab
+        } else {
+            alert("Gagal: " + res.msg);
+        }
+    });
+
+    function doLogin() {
+        const u = document.getElementById('loginUser').value;
+        const p = document.getElementById('loginPass').value;
+        if(!u || !p) return alert("Isi username & password!");
+
+        socket.emit('login_user', { username: u, password: p });
+        
+        // Simpan password sementara di memori untuk dekripsi private key nanti
+        window.tempPass = p; 
+        window.tempUser = u;
+    }
+
+    socket.on('login_response', (res) => {
+        if(res.success) {
+            try {
+                // 1. Dekripsi Private Key yang dikasih server pakai password user
+                const bytes = CryptoJS.AES.decrypt(res.encryptedPrivateKey, window.tempPass);
+                const privKeyHex = bytes.toString(CryptoJS.enc.Utf8);
+                
+                if(!privKeyHex) throw new Error("Password Salah (Gagal Decrypt Key)");
+
+                // 2. Load ke sistem Elliptic
+                myKeypair = ec.keyFromPrivate(privKeyHex);
+                myUsername = window.tempUser;
+
+                // 3. Masuk Dashboard
+                enterDashboard(res.publicKey);
+            } catch(e) {
+                alert("Login gagal: Password mungkin salah (Key Decryption Failed)");
+                console.error(e);
+            }
+        } else {
+            alert(res.msg);
+        }
+    });
+
+    function enterDashboard(pubKey) {
+        document.getElementById('authSection').style.display = 'none';
+        document.getElementById('chatSection').style.display = 'block';
+        document.getElementById('myUsernameDisplay').innerText = myUsername;
+        document.getElementById('debugPubKey').innerText = pubKey;
+        
+        // Bersihkan memori password
+        window.tempPass = null;
+    }
+
+    // === CHAT SYSTEM ===
+
+    // Update Dropdown User
+    socket.on('update_user_list', (users) => {
+        const sel = document.getElementById('recipientSelect');
+        sel.innerHTML = '<option value="">-- Pilih Penerima --</option>';
+        users.forEach(u => {
+            if(u !== myUsername) {
+                const opt = document.createElement('option');
+                opt.value = u;
+                opt.innerText = u;
+                sel.appendChild(opt);
+            }
+        });
+    });
+
+    // ENKRIPSI & KIRIM
+    function encryptAndSend() {
+        const toUser = document.getElementById('recipientSelect').value;
+        const msg = document.getElementById('msgInput').value;
+
+        if(!toUser || !msg) return alert("Pilih penerima & tulis pesan!");
+
+        // Minta Public Key Tujuan
+        socket.emit('request_target_key', toUser, (res) => {
+            if(!res.success) return alert("User offline / tidak ditemukan");
+
+            // --- ALGORITMA ECIES (EC-ElGamal) ---
+            
+            // 1. Generate Ephemeral Key (R)
+            const ephemKey = ec.genKeyPair();
+            const R_pub = ephemKey.getPublic('hex');
+
+            // 2. Hitung Shared Secret (S) = r * PubKey_Bob
+            const bobKey = ec.keyFromPublic(res.publicKey, 'hex');
+            const sharedSecret = ephemKey.derive(bobKey.getPublic()); // Titik Kurva
+            
+            // 3. Buat Kunci Simetris dari Shared Secret (Hash SHA256)
+            const aesKey = CryptoJS.SHA256(sharedSecret.toString(16)).toString();
+
+            // 4. Enkripsi Pesan pakai AES
+            const ciphertext = CryptoJS.AES.encrypt(msg, aesKey).toString();
+
+            // 5. Kirim Paket
+            const payload = {
+                from: myUsername,
+                to: toUser,
+                ephemPubKey: R_pub, // Ini bagian penting EC-ElGamal
+                ciphertext: ciphertext
+            };
+
+            socket.emit('send_message', payload);
+            document.getElementById('msgInput').value = "";
+            alert("Pesan Terenkripsi Dikirim!");
+        });
+    }
+
+    // TERIMA PESAN & DEKRIPSI MANUAL
+    socket.on('incoming_message', (data) => {
+        if(data.to !== myUsername) return;
+
+        const container = document.getElementById('inboxArea');
+        if(container.innerText.includes("Belum ada")) container.innerHTML = "";
+
+        // Buat ID unik untuk elemen pesan ini
+        const msgId = Date.now();
+
+        const html = `
+            <div class="card mb-2">
+                <div class="card-body py-2">
+                    <div class="d-flex justify-content-between">
+                        <strong>Dari: ${data.from}</strong>
+                        <small class="text-muted">${new Date().toLocaleTimeString()}</small>
+                    </div>
+                    
+                    <div class="mt-2">
+                        <small>Ciphertext (Yang dilihat Server/Hacker):</small>
+                        <div class="cipher-box">${data.ciphertext}</div>
+                    </div>
+
+                    <div class="mt-2" id="result-${msgId}" style="display:none;">
+                        <small>Pesan Asli (Hasil Dekripsi):</small>
+                        <div class="revealed-msg" id="plain-${msgId}"></div>
+                    </div>
+
+                    <button class="btn btn-sm btn-outline-success w-100 mt-2" 
+                        onclick="decryptMessage('${msgId}', '${data.ephemPubKey}', '${data.ciphertext}')">
+                        🔓 DEKRIPSI PESAN
+                    </button>
+                </div>
+            </div>
+        `;
+        container.insertAdjacentHTML('afterbegin', html);
+    });
+
+    // FUNGSI DEKRIPSI (DIPANGGIL SAAT KLIK TOMBOL)
+    window.decryptMessage = function(id, r_pub, ciphertext) {
+        try {
+            // --- ALGORITMA ECIES DEKRIPSI ---
+
+            // 1. Ambil Ephemeral Key Pengirim (R)
+            const rKey = ec.keyFromPublic(r_pub, 'hex');
+
+            // 2. Hitung Shared Secret (S) = PrivKey_Saya * R
+            const sharedSecret = myKeypair.derive(rKey.getPublic());
+
+            // 3. Re-create AES Key
+            const aesKey = CryptoJS.SHA256(sharedSecret.toString(16)).toString();
+
+            // 4. Decrypt AES
+            const bytes = CryptoJS.AES.decrypt(ciphertext, aesKey);
+            const originalText = bytes.toString(CryptoJS.enc.Utf8);
+
+            if(!originalText) throw new Error("Gagal Dekripsi");
+
+            // Tampilkan Hasil
+            document.getElementById(`plain-${id}`).innerText = originalText;
+            document.getElementById(`result-${id}`).style.display = 'block';
+            
+        } catch(e) {
+            alert("Gagal mendekripsi! Kunci mungkin tidak cocok.");
+        }
+    }
+</script>
+
+</body>
+</html>
